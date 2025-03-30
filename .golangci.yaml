@@ -1,0 +1,40 @@
+version: "2"
+
+run:
+  concurrency: 4
+  allow-parallel-runners: true
+  timeout: 10m
+
+linters:
+  enable:
+    # https://golangci-lint.run/usage/linters/
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - typecheck
+    - unused
+    - bodyclose
+    - errorlint
+    - forcetypeassert
+    - gochecknoinits
+    - gocritic
+    - gofmt
+    - goimports
+    - gosec
+    - misspell
+    - nakedret
+    - nilnil
+    - noctx
+    - revive
+    - unparam
+    - wastedassign
+  settings:
+    misspell:
+      # Correct spellings using locale preferences for US or UK.
+      # Default is to use a neutral variety of English.
+      # Setting locale to US will correct the British spelling of 'colour' to 'color'.
+      locale: US
+    nakedret:
+      max-func-lines: 0
