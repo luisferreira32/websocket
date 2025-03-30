@@ -2,5 +2,5 @@ package websocket
 
 import "net/http"
 
-func Accept(rw http.ResponseWriter, req *http.Request) {
+func Accept(_ http.ResponseWriter, _ *http.Request) {
 }

@@ -7,17 +7,25 @@ import (
 
 func Test_validateWebsocketURI(t *testing.T) {
 	tests := []struct {
-		name    string
-		uri     string
-		wantErr error
+		name       string
+		uri        string
+		wantErr    error
+		wantResult string
 	}{
 		{
-			name: "Valid ws URI",
-			uri:  "ws://example.com",
+			name:       "Valid ws URI without port",
+			uri:        "ws://example.com",
+			wantResult: "ws://example.com:80",
 		},
 		{
-			name: "Valid wss URI",
-			uri:  "wss://example.com",
+			name:       "Valid wss URI without port",
+			uri:        "wss://example.com",
+			wantResult: "wss://example.com:443",
+		},
+		{
+			name:       "Valid ws URI with port",
+			uri:        "ws://example.com:8080",
+			wantResult: "ws://example.com:8080",
 		},
 		{
 			name:    "Invalid scheme",
@@ -48,9 +56,12 @@ func Test_validateWebsocketURI(t *testing.T) {
 
 	for _, testcase := range tests {
 		t.Run(testcase.name, func(t *testing.T) {
-			err := validateWebsocketURI(testcase.uri)
+			result, err := validateWebsocketURI(testcase.uri)
 			if !errors.Is(err, testcase.wantErr) {
 				t.Errorf("validateWebsocketURI() error = %v, wantErr %v", err, testcase.wantErr)
+			}
+			if result != testcase.wantResult && testcase.wantErr == nil {
+				t.Errorf("validateWebsocketURI() result = %v, wantResult %v", result, testcase.wantResult)
 			}
 		})
 	}
