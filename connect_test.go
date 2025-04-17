@@ -60,8 +60,8 @@ func Test_validateWebsocketURI(t *testing.T) {
 			if !errors.Is(err, testcase.wantErr) {
 				t.Errorf("validateWebsocketURI() error = %v, wantErr %v", err, testcase.wantErr)
 			}
-			if result != testcase.wantResult && testcase.wantErr == nil {
-				t.Errorf("validateWebsocketURI() result = %v, wantResult %v", result, testcase.wantResult)
+			if result != nil && result.String() != testcase.wantResult {
+				t.Errorf("validateWebsocketURI() result = %v, wantResult %v", result.String(), testcase.wantResult)
 			}
 		})
 	}

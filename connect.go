@@ -1,12 +1,14 @@
 package websocket
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/sha1" // nolint:gosec // this is the spefied hash of the WebSocket protocol
 	"encoding/base64"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -32,12 +34,25 @@ func (c *connection) Close() error {
 	return nil
 }
 
+// ConnectionOption is a function that configures the WebSocket connection.
+//
+// It can be used to set optional fields in the initial request, such as cookies,
+// additional headers, etc.
+type ConnectionOption func(*http.Request)
+
+// WithCookies adds a cookie to the WebSocket connection request.
+func WithCookies(cookie http.Cookie) func(r *http.Request) {
+	return func(r *http.Request) {
+		r.AddCookie(&cookie)
+	}
+}
+
 var (
 	connectionsMu sync.Mutex
 	connections   = map[string]*connection{}
 )
 
-// Connect establishes a WebSocket connection to the given URI.
+// EstablishConnection establishes a WebSocket connection to the given URI.
 //
 // The URI must be a valid WebSocket URI, as defined in RFC6455 Section 3.
 // The function will block until the connection is established or an error occurs,
@@ -49,13 +64,11 @@ var (
 //		Scheme: websocket.SchemeWS.String(),
 //		Host:   "localhost:8080",
 //	}.String())
-func Connect(ctx context.Context, uri string) (Connection, error) {
-	validatedURI, err := validateWebsocketURI(uri)
+func EstablishConnection(ctx context.Context, uri string, opts ...ConnectionOption) (Connection, error) {
+	u, err := validateWebsocketURI(uri)
 	if err != nil {
 		return nil, err
 	}
-
-	u, _ := url.Parse(validatedURI)
 	host := u.Host
 
 	// TODO: if we get websocket to support HTTP/3, we should use UDP instead of TCP
@@ -64,6 +77,10 @@ func Connect(ctx context.Context, uri string) (Connection, error) {
 	addr, err := net.ResolveTCPAddr("tcp", host)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve address: %w", err)
+	}
+
+	c := &connection{
+		stateConnecting: make(chan struct{}),
 	}
 
 	connectionsMu.Lock()
@@ -81,6 +98,7 @@ func Connect(ctx context.Context, uri string) (Connection, error) {
 			return nil, ctx.Err()
 		}
 	}
+	connections[host] = c
 	connectionsMu.Unlock()
 
 	dialer := &net.Dialer{}
@@ -102,46 +120,61 @@ func Connect(ctx context.Context, uri string) (Connection, error) {
 		return nil, fmt.Errorf("%w: failed to generate nonce: %w", ErrOpenIssue, err)
 	}
 
-	// MAYBE: use std lib net/http for the request build?
+	// TODO: apply the options to the request
+	// TODO: validate the request before executing it
 	// TODO: |Sec-WebSocket-Protocol| header field support
 	// TODO: |Sec-WebSocket-Extensions| header field support
-	request := fmt.Sprintf(`GET %s HTTP/1.1
-Host: %s
-Upgrade: websocket
-Connection: Upgrade
-Sec-WebSocket-Key: %s
-Sec-WebSocket-Version: 13`,
-		u.RequestURI(), u.Host, nonce,
-	)
+	req := &http.Request{
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Method:     http.MethodGet,
+		URL:        u,
+		Host:       u.Host,
+		Header: http.Header{
+			"Upgrade":               {"websocket"},
+			"Connection":            {"Upgrade"},
+			"Sec-WebSocket-Key":     {nonce},
+			"Sec-WebSocket-Version": {"13"},
+		},
+	}
 
-	_, err = conn.Write([]byte(request))
+	err = req.Write(conn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send handshake request: %w", err)
 	}
 
-	response := make([]byte, 4096)
-	n, err := conn.Read(response)
+	response, err := http.ReadResponse(bufio.NewReader(conn), req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read handshake response: %w", err)
 	}
+	defer func() {
+		_ = response.Body.Close()
+	}()
 
-	if !strings.Contains(string(response[:n]), "101 Switching Protocols") {
-		return nil, fmt.Errorf("invalid handshake response: %s", string(response[:n]))
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		return nil, fmt.Errorf("invalid handshake response: %s", response.Status)
+	}
+
+	if conditions := response.Header["Connection"]; len(conditions) == 0 || conditions[0] != "Upgrade" {
+		return nil, fmt.Errorf("invalid handshake response: invalid Connection header: %v", conditions)
+	}
+
+	if upgrade := response.Header["Upgrade"]; len(upgrade) == 0 || upgrade[0] != "websocket" {
+		return nil, fmt.Errorf("invalid handshake response: invalid Upgrade header: %v", upgrade)
 	}
 
 	expectedAccept := computeAcceptKey(nonce)
-	if !strings.Contains(string(response[:n]), fmt.Sprintf("Sec-WebSocket-Accept: %s", expectedAccept)) {
-		return nil, fmt.Errorf("invalid Sec-WebSocket-Accept in response")
+	if accept := response.Header["Sec-WebSocket-Accept"]; len(accept) == 0 || strings.TrimSpace(accept[0]) != expectedAccept {
+		return nil, fmt.Errorf("invalid handshake response: invalid Sec-WebSocket-Accept header: %v", accept)
 	}
 
-	c := &connection{
-		conn:            conn,
-		stateConnecting: make(chan struct{}),
-	}
+	// TODO: check for |Sec-WebSocket-Extensions|
+	// TODO: check for |Sec-WebSocket-Protocol|
+
+	c.conn = conn
+	close(c.stateConnecting)
 	conn = nil // do not close the connection in the defer if we succeed
-	connectionsMu.Lock()
-	connections[host] = c
-	connectionsMu.Unlock()
 	return c, nil
 }
 
@@ -174,29 +207,29 @@ func (s Scheme) String() string {
 }
 
 // validation according to RFC6455 Section 3.
-func validateWebsocketURI(uri string) (string, error) {
+func validateWebsocketURI(uri string) (*url.URL, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrInvalidURI, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidURI, err)
 	}
 
 	if u.Host == "" {
-		return "", fmt.Errorf("%w: no host specified", ErrInvalidURI)
+		return nil, fmt.Errorf("%w: no host specified", ErrInvalidURI)
 	}
 
 	if u.Fragment != "" {
-		return "", fmt.Errorf("%w: fragment identifiers are not allowed in WebSocket URIs", ErrInvalidURI)
+		return nil, fmt.Errorf("%w: fragment identifiers are not allowed in WebSocket URIs", ErrInvalidURI)
 	}
 
 	if u.Port() != "" {
 		port, err := strconv.Atoi(u.Port())
 		if err != nil || port < 1 || port > 65535 {
-			return "", fmt.Errorf("%w: invalid port number", ErrInvalidURI)
+			return nil, fmt.Errorf("%w: invalid port number", ErrInvalidURI)
 		}
 	}
 
 	if u.Scheme != string(SchemeWS) && u.Scheme != string(SchemeWSS) {
-		return "", fmt.Errorf("%w: %s, must be '%s' or '%s'", ErrInvalidURI, u.Scheme, SchemeWSS, SchemeWS)
+		return nil, fmt.Errorf("%w: %s, must be '%s' or '%s'", ErrInvalidURI, u.Scheme, SchemeWSS, SchemeWS)
 	}
 
 	if u.Port() == "" {
@@ -206,9 +239,9 @@ func validateWebsocketURI(uri string) (string, error) {
 		case string(SchemeWSS):
 			u.Host += ":443"
 		default:
-			return "", fmt.Errorf("%w: %s, must be '%s' or '%s'", ErrInvalidURI, u.Scheme, SchemeWSS, SchemeWS)
+			return nil, fmt.Errorf("%w: %s, must be '%s' or '%s'", ErrInvalidURI, u.Scheme, SchemeWSS, SchemeWS)
 		}
 	}
 
-	return u.String(), nil
+	return u, nil
 }
