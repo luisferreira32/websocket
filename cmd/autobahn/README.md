@@ -1,6 +1,6 @@
 # Autobahn test setup for websocket compliance
 
-## Test client implementation
+## Test server implementation
 
 Start the server:
 
@@ -12,13 +12,14 @@ Then run the test:
 
 ```
 docker run -it --rm \
+    --add-host=host.docker.internal:host-gateway \
     -v ${PWD}/config:/config \
     -v ${PWD}/reports:/reports \
     crossbario/autobahn-testsuite \
     wstest -m fuzzingclient -s /config/fuzzingclient.json
 ```
 
-## Test server implementation
+## Test client implementation
 
 Start the test server:
 
